@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestOverlayJS_toggleDefaultOff(t *testing.T) {
@@ -84,29 +83,4 @@ func TestParseEditEvent(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestParseNotes(t *testing.T) {
-	t.Parallel()
-	input := `[{"id":"es_1","selector":"#app","label":"App","note":"test","url":"http://localhost","createdAt":1,"editedAt":1,"dispatchedAt":0}]`
-	notes, ok := parseNotes([]byte(input))
-	require.True(t, ok)
-	require.Len(t, notes, 1)
-	assert.Equal(t, "es_1", notes[0].ID)
-	assert.Equal(t, "#app", notes[0].Selector)
-	assert.Equal(t, "test", notes[0].Note)
-	assert.Equal(t, int64(0), notes[0].DispatchedAt)
-}
-
-func TestParseNotes_emptyArray(t *testing.T) {
-	t.Parallel()
-	notes, ok := parseNotes([]byte("[]"))
-	require.True(t, ok)
-	assert.Empty(t, notes)
-}
-
-func TestParseNotes_invalid(t *testing.T) {
-	t.Parallel()
-	_, ok := parseNotes([]byte("not json"))
-	assert.False(t, ok)
 }

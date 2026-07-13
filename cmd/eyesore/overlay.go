@@ -2,18 +2,6 @@ package main
 
 import "encoding/json"
 
-// Note represents a UI annotation captured by the harness overlay.
-type Note struct {
-	ID           string `json:"id"`
-	Selector     string `json:"selector"`
-	Label        string `json:"label"`
-	Note         string `json:"note"`
-	URL          string `json:"url"`
-	CreatedAt    int64  `json:"createdAt"`
-	EditedAt     int64  `json:"editedAt"`
-	DispatchedAt int64  `json:"dispatchedAt"`
-}
-
 type deleteEvent struct {
 	ID string `json:"id"`
 }
@@ -39,20 +27,42 @@ func parseEditEvent(data []byte) (editEvent, bool) {
 	return e, true
 }
 
-func parseNotes(data []byte) ([]Note, bool) {
-	var notes []Note
-	if err := json.Unmarshal(data, &notes); err != nil {
-		return nil, false
-	}
-	return notes, true
-}
-
 const overlayJS = `
 (function(){
   if(window.__es){window.__es.ensure();return;}
   var notes=[],enabled=false,dialogOpen=false;
 
   function isES(el){return !!(el&&el.closest&&el.closest('[data-es]'));}
+
+  var proxyMode=!window.esDispatch;
+  function ship(json){
+    if(window.esDispatch){window.esDispatch(json);return;}
+    fetch('/__eyesore/dispatch',{method:'POST',headers:{'Content-Type':'application/json'},body:json});
+  }
+  function listen(){
+    if(!proxyMode||window.__esSSE)return;
+    try{
+      var es=new EventSource('/__eyesore/events');window.__esSSE=es;
+      es.addEventListener('reload',function(){location.reload();});
+      es.addEventListener('notes',function(ev){
+        try{
+          var changed=JSON.parse(ev.data)||[];
+          var touched=false;
+          changed.forEach(function(c){
+            for(var i=0;i<notes.length;i++){
+              if(notes[i].id===c.id){
+                notes[i].agentStatus=c.agentStatus;
+                notes[i].agentSummary=c.agentSummary;
+                notes[i].fixedAt=c.fixedAt;
+                touched=true;
+              }
+            }
+          });
+          if(touched){save();renderBadges();}
+        }catch(_){}
+      });
+    }catch(_){}
+  }
 
   function id(){return 'es_'+Date.now()+'_'+Math.random().toString(36).slice(2,6);}
 
@@ -143,6 +153,7 @@ const overlayJS = `
       '[data-es=popover] .es-pop-note{margin-bottom:8px;white-space:pre-wrap;word-break:break-word;',
         'color:#e8e8e8}',
       '[data-es=popover] .es-pop-meta{font-size:11px;color:#666;margin-bottom:8px}',
+      '[data-es=popover] .es-pop-agent{font-size:12px;color:#7fd6a4;margin-bottom:8px}',
       '[data-es=popover] .es-pop-actions{display:flex;gap:6px;justifyContent:flex-end}',
       '',
       '[data-es=popover] .es-btn{padding:5px 12px;font-size:12px;border-radius:5px;',
@@ -254,6 +265,8 @@ const overlayJS = `
         if(!el.style.position||el.style.position==='static')el.style.position='relative';
         var badge=document.createElement('div');badge.setAttribute('data-es','badge');
         badge.textContent=String(i+1);
+        if(n.agentStatus==='working')badge.style.background='#f5a623';
+        if(n.agentStatus==='fixed')badge.style.background='#1a7f4b';
         badge.addEventListener('mouseenter',function(ev){ev.stopPropagation();showPopover(el,n);},true);
         badge.addEventListener('mouseleave',function(){scheduleHidePopover();},true);
         el.appendChild(badge);
@@ -272,7 +285,9 @@ const overlayJS = `
     var top=r.top;if(top+180>window.innerHeight)top=window.innerHeight-190;
     if(top<8)top=8;
     pop.style.left=left+'px';pop.style.top=top+'px';
-    pop.innerHTML='<div class="es-pop-note">'+esc(note.note)+'</div>'+
+    var agentLine=note.agentStatus?('<div class="es-pop-agent">'+
+      (note.agentStatus==='working'?'&#9203; agent working&hellip;':'&#10003; '+esc(note.agentSummary||'fixed'))+'</div>'):'';
+    pop.innerHTML='<div class="es-pop-note">'+esc(note.note)+'</div>'+agentLine+
       '<div class="es-pop-meta">'+esc(note.selector)+'</div>'+
       '<div class="es-pop-actions">'+
       '<button data-es="pop-edit" class="es-btn es-btn-edit">Edit</button>'+
@@ -385,7 +400,7 @@ const overlayJS = `
     var now=Date.now();
     notes.forEach(function(n){if(n.dispatchedAt===0||n.editedAt>n.dispatchedAt)n.dispatchedAt=now;});
     save();renderBadges();
-    if(window.esDispatch)window.esDispatch(JSON.stringify(edited));
+    ship(JSON.stringify(edited));
     if(dispatchBtn){dispatchBtn.textContent='Dispatched '+edited.length+' \u2713';
       dispatchBtn.className='es-green';
       setTimeout(function(){applyEnabled();},1400);}
@@ -408,7 +423,7 @@ const overlayJS = `
   },true);
 
   // ── init ───────────────────────────────────────────────────
-  function init(){load();ensure();renderBadges();}
+  function init(){load();ensure();renderBadges();listen();}
   window.__es={ensure:ensure,notes:function(){return notes;},enabled:function(){return enabled;}};
   init();
   setInterval(ensure,1000);

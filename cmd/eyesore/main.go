@@ -16,19 +16,41 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/joaomdsg/eyesore/internal/browser"
+	"github.com/joaomdsg/eyesore/internal/notes"
+	"github.com/joaomdsg/eyesore/internal/store"
+
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "mcp":
+			if err := runMCP(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "eyesore mcp:", err)
+				os.Exit(1)
+			}
+			return
+		case "proxy":
+			if err := runProxy(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, "eyesore proxy:", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
 	url := flag.String("url", "http://127.0.0.1:3000/", "app URL to annotate")
 	out := flag.String("out", "eyesore-out/notes.json", "dispatched notes output")
 	chrome := flag.String("chrome", "", "browser executable (default: auto-detect)")
+	debugPort := flag.String("debug-port", "9222", "CDP port exposed to `eyesore mcp` browser tools")
 	flag.Parse()
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", false),
+		chromedp.Flag("remote-debugging-port", *debugPort),
 	)
 	if *chrome != "" {
 		opts = append(opts, chromedp.ExecPath(*chrome))
@@ -70,6 +92,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "eyesore run:", err)
 		os.Exit(1)
 	}
+	if err := os.MkdirAll(outDir, 0o755); err == nil {
+		endpoint := filepath.Join(outDir, "browser.json")
+		if werr := browser.WriteEndpoint(endpoint, "http://127.0.0.1:"+*debugPort); werr == nil {
+			defer os.Remove(endpoint)
+		}
+	}
 	fmt.Printf("eyesore ready on %s — Ctrl-Shift-N to toggle, click elements to annotate, Dispatch to ship. Ctrl-C to quit.\n", *url)
 
 	sig := make(chan os.Signal, 1)
@@ -84,14 +112,17 @@ func main() {
 func handleBinding(ctx context.Context, be *runtime.EventBindingCalled, outPath, outDir string) {
 	switch be.Name {
 	case "esDispatch":
-		notes, ok := parseNotes([]byte(be.Payload))
-		if !ok || len(notes) == 0 {
+		dispatched, ok := notes.Parse([]byte(be.Payload))
+		if !ok || len(dispatched) == 0 {
 			return
 		}
-		captureScreenshots(ctx, notes, outDir)
-		data, _ := json.MarshalIndent(notes, "", "  ")
-		_ = os.WriteFile(outPath, data, 0o644)
-		fmt.Printf("=== DISPATCHED %d NOTE(S) ===\n", len(notes))
+		captureScreenshots(ctx, dispatched, outDir)
+		if err := store.New(outPath).Merge(dispatched); err != nil {
+			fmt.Fprintln(os.Stderr, "store merge:", err)
+			return
+		}
+		data, _ := json.MarshalIndent(dispatched, "", "  ")
+		fmt.Printf("=== DISPATCHED %d NOTE(S) ===\n", len(dispatched))
 		fmt.Println(string(data))
 		fmt.Println("=== END NOTES ===")
 
@@ -112,21 +143,21 @@ func handleBinding(ctx context.Context, be *runtime.EventBindingCalled, outPath,
 	}
 }
 
-func captureScreenshots(ctx context.Context, notes []Note, outDir string) {
+func captureScreenshots(ctx context.Context, ns []notes.Note, outDir string) {
 	ssDir := filepath.Join(outDir, "screenshots")
 	if err := os.MkdirAll(ssDir, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "screenshot dir: %v\n", err)
 		return
 	}
-	for i := range notes {
+	for i := range ns {
 		var buf []byte
 		if err := chromedp.Run(ctx,
-			chromedp.Screenshot(notes[i].Selector, &buf, chromedp.ByQuery),
+			chromedp.Screenshot(ns[i].Selector, &buf, chromedp.ByQuery),
 		); err != nil {
-			fmt.Fprintf(os.Stderr, "screenshot %s: %v\n", notes[i].ID, err)
+			fmt.Fprintf(os.Stderr, "screenshot %s: %v\n", ns[i].ID, err)
 			continue
 		}
-		path := filepath.Join(ssDir, notes[i].ID+".png")
+		path := filepath.Join(ssDir, ns[i].ID+".png")
 		if err := os.WriteFile(path, buf, 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "screenshot write %s: %v\n", path, err)
 		}
