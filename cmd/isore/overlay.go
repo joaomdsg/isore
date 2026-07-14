@@ -55,14 +55,19 @@ const overlayJS = `
     });
     if(touched){save();applyEnabled();}
   }
-  function listen(){
-    if(!proxyMode||window.__esSSE)return;
-    // reconcile first: this tab may have missed changes while closed
+  // reconcile pulls the authoritative note state: SSE only streams diffs, so
+  // any gap in the stream (tab closed, proxy restarted) is healed here.
+  function reconcile(){
     fetch('/__isore/notes').then(function(r){return r.json();})
       .then(applyServerNotes).catch(function(){});
+  }
+  function listen(){
+    if(!proxyMode||window.__esSSE)return;
     try{
       var es=new EventSource('/__isore/events');window.__esSSE=es;
-      es.onopen=function(){sseLive=true;renderStatus();};
+      // onopen refires on every auto-reconnect — reconcile each time, since
+      // whatever streamed while the connection was down is gone for good.
+      es.onopen=function(){sseLive=true;reconcile();renderStatus();};
       es.onerror=function(){sseLive=false;renderStatus();};
       es.addEventListener('reload',function(){location.reload();});
       es.addEventListener('notes',function(ev){
@@ -390,18 +395,18 @@ const overlayJS = `
     return false;
   }
   function applyEnabled(){
-    if(toggleInput)toggleInput.checked=enabled;
+    // The whole annotator freezes while the agent works: mid-fix edits,
+    // deletes, or dispatches would collide with the agent's changes.
+    if(toggleInput){toggleInput.checked=enabled;toggleInput.disabled=anyWorking();}
     if(dispatchBtn){
       var c=countEdited();
-      var hasNotes=notes.length>0;
       if(anyWorking()){
-        // mid-fix dispatches would collide with the agent's edits
         dispatchBtn.textContent='agent working\u2026';
         dispatchBtn.disabled=true;
         dispatchBtn.className='';
       }else{
         dispatchBtn.textContent=enabled?('Dispatch ('+c+')'):'Dispatch';
-        dispatchBtn.disabled=!enabled||!hasNotes;
+        dispatchBtn.disabled=!enabled||c===0;
         dispatchBtn.className=c>0&&enabled?'es-green':'';
       }
     }
@@ -475,6 +480,7 @@ const overlayJS = `
 
   // ── delete confirm ─────────────────────────────────────────
   function confirmDelete(el,note,pop){
+    if(anyWorking())return;
     pop.querySelector('.es-pop-actions').innerHTML=
       '<button data-es="del-cancel" class="es-btn es-btn-cancel">Cancel</button>'+
       '<button data-es="del-confirm" class="es-btn es-btn-confirm">Confirm</button>';
@@ -501,7 +507,7 @@ const overlayJS = `
 
   // ── inline input (new note) ────────────────────────────────
   function openInline(el){
-    if(dialogOpen)return;dialogOpen=true;
+    if(dialogOpen||anyWorking())return;dialogOpen=true;
     if(hi)hi.style.display='none';
     var card=buildInlineCard(el,selectorOf(el));
     card.innerHTML='<div class="es-inline-hint">'+esc(selectorOf(el))+'</div>'+
@@ -531,7 +537,7 @@ const overlayJS = `
 
   // ── inline edit ────────────────────────────────────────────
   function openInlineEdit(el,note){
-    if(dialogOpen)return;dialogOpen=true;
+    if(dialogOpen||anyWorking())return;dialogOpen=true;
     var card=buildInlineCard(el);
     card.innerHTML='<div class="es-inline-hint">Edit note</div>'+
       '<textarea data-es="in" rows="3" placeholder="Note text\u2026">'+esc(note.note)+'</textarea>'+
@@ -582,13 +588,13 @@ const overlayJS = `
   // ── hover highlight ────────────────────────────────────────
   document.addEventListener('mousemove',function(e){
     if(!hi||!enabled)return;var el=e.target;
-    if(dialogOpen||isES(el)){hi.style.display='none';return;}
+    if(dialogOpen||isES(el)||anyWorking()){hi.style.display='none';return;}
     var r=el.getBoundingClientRect();
     Object.assign(hi.style,{display:'block',left:r.left+'px',top:r.top+'px',width:r.width+'px',height:r.height+'px'});
   },true);
 
   document.addEventListener('click',function(e){
-    if(!enabled)return;var el=e.target;
+    if(!enabled||anyWorking())return;var el=e.target;
     if(isES(el))return;
     e.preventDefault();e.stopPropagation();
     openInline(el);
@@ -599,6 +605,9 @@ const overlayJS = `
   window.__es={ensure:ensure,notes:function(){return notes;},enabled:function(){return enabled;}};
   init();
   setInterval(ensure,1000);
+  // Fallback while the SSE stream is down (e.g. proxy briefly gone): keep
+  // polling so a frozen overlay can still thaw if reconnects keep failing.
+  setInterval(function(){if(proxyMode&&!sseLive)reconcile();},5000);
 })();
 true
 `

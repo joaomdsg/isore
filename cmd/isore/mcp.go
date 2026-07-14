@@ -128,20 +128,19 @@ type markFixedOut struct {
 }
 
 // instructions is surfaced to the connecting model on initialize. It describes
-// the hands-off background loop the harness should run: one worker per dispatch
-// cycle, chained so the foreground conversation never blocks.
-const instructions = `Isore turns a user's live browser annotations into coding tasks. The user clicks an element in their running web app, writes a note about what to change, and hits Dispatch. You fix the code and their page updates live: badges turn amber while you work, green with your summary when done, and the page reloads after a rebuild.
+// the loop the agent runs itself: block on await_notes, fix the batch, repeat.
+// No subagents — handing notes to workers loses the conversation's context.
+const instructions = `Isore turns a user's live browser annotations into coding tasks. The user clicks an element in their running web app, writes a note about what to change, and hits Dispatch. You fix the code and their page updates live: badges turn amber while you work, green with your summary when done, and the page reloads after a rebuild. The overlay freezes while you work, so the user cannot dispatch again until you finish the batch — finish it promptly.
 
-Run isore as a hands-off background loop so the foreground conversation is never blocked. Use ONE background worker per dispatch cycle: each worker handles a single dispatch, then hands off to a fresh worker. Chaining workers (rather than one worker looping forever) keeps each worker's context small.
+Do ALL of this yourself, in the main conversation. Do NOT delegate dispatches to subagents or background workers: they lack your context about the codebase and the session.
 
-1. SETUP (foreground, once): call start_proxy(targetPort, proxyPort). targetPort is the user's dev-server port; proxyPort is where the annotated app is served (defaults 3000 and 4400). It opens a driven Chromium window showing the overlay — the same window your browser_* tools drive. If its result warns that no drivable browser was found, relay the warning and the install suggestion to the user before continuing. Then launch the first background worker and return control to the user — do not block on listening.
+1. SETUP (once): call start_proxy(targetPort, proxyPort). targetPort is the user's dev-server port; proxyPort is where the annotated app is served (defaults 3000 and 4400). It opens a driven Chromium window showing the overlay — the same window your browser_* tools drive. If its result warns that no drivable browser was found, relay the warning and the install suggestion to the user before continuing. Then call list_notes and act (step 3) on anything already pending.
 
-2. EACH BACKGROUND WORKER handles one dispatch cycle:
-   a. First worker only: call list_notes and act (step c) on anything already pending.
-   b. LISTEN: call await_notes(sinceMs). It blocks until the user dispatches, or returns empty on timeout; on empty, call it again to keep listening. Pass sinceMs=0 on the first-ever call (means "anything from now on"); otherwise pass the largest dispatchedAt you have already handled, so you never reprocess a batch.
-   c. ACT on the returned batch (all notes from one Dispatch). For each note: call mark_working(id) first (badge turns amber so the user sees you picked it up); get_screenshot(id) to see exactly what the user saw at dispatch; use the note's note/selector/label/url to make the code change; verify against the live page with browser_screenshot / browser_eval / browser_html if useful; then mark_fixed(id, summary) with a short, user-facing summary (badge turns green and the summary shows in the overlay).
-   d. When the whole batch is fixed and the app has rebuilt, call reload_page once so the user's tabs refresh.
-   e. HAND OFF: launch a fresh background worker for the next cycle, passing it the updated sinceMs checkpoint (the largest dispatchedAt you handled), then finish. The new worker resumes at step b.
+2. LISTEN: call await_notes(sinceMs). It BLOCKS until the user dispatches, or returns empty on timeout; on empty, call it again to keep listening. Pass sinceMs=0 on the first call (means "anything from now on"); afterwards pass the largest dispatchedAt you have already handled, so you never reprocess a batch.
+
+3. ACT on the returned batch (all notes from one Dispatch). For each note: call mark_working(id) first (badge turns amber and the overlay freezes so the user knows you picked it up); get_screenshot(id) to see exactly what the user saw at dispatch; use the note's note/selector/label/url to make the code change; verify against the live page with browser_screenshot / browser_eval / browser_html if useful; then mark_fixed(id, summary) with a short, user-facing summary (badge turns green, the summary shows in the overlay, and once every note is fixed the overlay thaws).
+
+4. When the whole batch is fixed and the app has rebuilt, call reload_page once so the user's tabs refresh, then go back to step 2.
 
 Notes: the store is safe under concurrent mark_working/mark_fixed calls. reload_page works only after start_proxy has been called. Keep summaries short — the user reads them in the overlay.`
 

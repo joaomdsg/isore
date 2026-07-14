@@ -36,6 +36,8 @@ go install github.com/joaomdsg/isore/cmd/isore@latest
 
 3. Toggle the overlay (bottom-right), click elements, write notes,
    **Dispatch**. The agent picks them up, fixes them, and refreshes your page.
+   While the agent works the annotator freezes (no new notes, edits, or
+   dispatches) and thaws when the batch is done.
 
 The agent doesn't just read your notes — it gets the browser:
 
