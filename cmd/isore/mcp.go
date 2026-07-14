@@ -20,9 +20,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// openBrowser best-effort launches the user's default browser at rawURL.
-// A package var so tests can stub it — the real one shells out per platform.
-var openBrowser = func(rawURL string) {
+// openBrowser best-effort opens the user's default browser at rawURL —
+// the fallback when no drivable Chromium exists.
+func openBrowser(rawURL string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
@@ -134,7 +134,7 @@ const instructions = `Isore turns a user's live browser annotations into coding 
 
 Run isore as a hands-off background loop so the foreground conversation is never blocked. Use ONE background worker per dispatch cycle: each worker handles a single dispatch, then hands off to a fresh worker. Chaining workers (rather than one worker looping forever) keeps each worker's context small.
 
-1. SETUP (foreground, once): call start_proxy(targetPort, proxyPort). targetPort is the user's dev-server port; proxyPort is where the annotated app is served (defaults 3000 and 4400). It opens the user's browser to the overlay. Then launch the first background worker and return control to the user — do not block on listening.
+1. SETUP (foreground, once): call start_proxy(targetPort, proxyPort). targetPort is the user's dev-server port; proxyPort is where the annotated app is served (defaults 3000 and 4400). It opens a driven Chromium window showing the overlay — the same window your browser_* tools drive. If its result warns that no drivable browser was found, relay the warning and the install suggestion to the user before continuing. Then launch the first background worker and return control to the user — do not block on listening.
 
 2. EACH BACKGROUND WORKER handles one dispatch cycle:
    a. First worker only: call list_notes and act (step c) on anything already pending.
@@ -163,6 +163,8 @@ func runMCP(args []string) error {
 	}, &mcp.ServerOptions{Instructions: instructions})
 
 	holder := &proxyHolder{}
+	ub := newUserBrowser()
+	toolsPool := &driverPool{outDir: filepath.Dir(*out)}
 	// Dedicated pool + mutex so dispatch-time element captures never interleave
 	// navigations with the browser_* tools' pool (one driver, one tab).
 	shootPool := &driverPool{outDir: filepath.Dir(*out)}
@@ -224,7 +226,7 @@ func runMCP(args []string) error {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "start_proxy",
-		Description: "Start isore in proxy mode: run a reverse proxy that injects the annotation overlay in front of the user's dev server, and open their browser to it. Pass the port your dev server listens on (targetPort) and the port to serve the annotated app on (proxyPort). Calling again restarts the proxy on the new ports. After it returns, call await_notes to receive the user's annotations.",
+		Description: "Start isore in proxy mode: run a reverse proxy that injects the annotation overlay in front of the user's dev server, and open a driven Chromium window to it (the same window the browser_* tools drive; falls back to the default browser with a warning if no Chromium/Chrome is installed). Pass the port your dev server listens on (targetPort) and the port to serve the annotated app on (proxyPort). Calling again restarts the proxy on the new ports. After it returns, call await_notes to receive the user's annotations.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in startProxyIn) (*mcp.CallToolResult, startProxyOut, error) {
 		targetPort := in.TargetPort
 		if targetPort == 0 {
@@ -243,11 +245,16 @@ func runMCP(args []string) error {
 		if err != nil {
 			return nil, startProxyOut{}, fmt.Errorf("start proxy on %s: %w", listen, err)
 		}
-		openBrowser(base)
-		return nil, startProxyOut{
-			URL:     base,
-			Message: fmt.Sprintf("Proxy live: annotating http://127.0.0.1:%d at %s (browser opened). Ctrl-Shift-N toggles the overlay; call await_notes for dispatches.", targetPort, base),
-		}, nil
+		warning, d := ub.open(base)
+		msg := fmt.Sprintf("Proxy live: annotating http://127.0.0.1:%d at %s.", targetPort, base)
+		if d != nil {
+			toolsPool.seed(d)
+			msg += " A driven Chromium window is showing it — your browser_* tools drive that same window."
+		} else {
+			msg += " " + warning
+		}
+		msg += " Ctrl-Shift-N toggles the overlay; call await_notes for dispatches."
+		return nil, startProxyOut{URL: base, Message: msg}, nil
 	})
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -260,7 +267,7 @@ func runMCP(args []string) error {
 		return nil, okOut{OK: true}, nil
 	})
 
-	addBrowserTools(server, h, &driverPool{outDir: filepath.Dir(*out)})
+	addBrowserTools(server, h, toolsPool)
 
 	fmt.Fprintf(os.Stderr, "isore mcp: serving stdio, store %s\n", *out)
 	return server.Run(context.Background(), &mcp.StdioTransport{})

@@ -19,6 +19,23 @@ type driverPool struct {
 	outDir string
 }
 
+// seed hands the pool an already-running driver (the user's visible browser)
+// so the browser_* tools drive the very window the user is annotating in.
+// Any earlier lazily-launched driver is closed and replaced: the agent must
+// never keep driving an invisible browser once a visible one exists. Safe
+// because MCP tool calls are sequential — no call is mid-flight during seed.
+func (p *driverPool) seed(d *browser.Driver) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.d == d {
+		return
+	}
+	if p.d != nil {
+		p.d.Close()
+	}
+	p.d = d
+}
+
 func (p *driverPool) get(ctx context.Context) (*browser.Driver, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -37,7 +37,24 @@ func Attach(parent context.Context, debugURL string) (*Driver, error) {
 // Launch starts an owned headless browser (proxy mode). chromePath "" means
 // auto-detect.
 func Launch(parent context.Context, chromePath string) (*Driver, error) {
+	return launch(parent, chromePath, true)
+}
+
+// LaunchVisible starts an owned headed browser — the window the user
+// annotates in when no harness browser exists.
+func LaunchVisible(parent context.Context, chromePath string) (*Driver, error) {
+	return launch(parent, chromePath, false)
+}
+
+func launch(parent context.Context, chromePath string, headless bool) (*Driver, error) {
 	opts := chromedp.DefaultExecAllocatorOptions[:]
+	if !headless {
+		opts = append(opts,
+			chromedp.Flag("headless", false),
+			chromedp.Flag("hide-scrollbars", false),
+			chromedp.Flag("mute-audio", false),
+		)
+	}
 	if chromePath != "" {
 		opts = append(opts, chromedp.ExecPath(chromePath))
 	}

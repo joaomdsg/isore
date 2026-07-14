@@ -24,7 +24,9 @@ go install github.com/joaomdsg/isore/cmd/isore@latest
 
 2. Ask your agent to start isore in front of your dev server. It calls the
    `start_proxy` tool, which stands up a reverse proxy that injects the overlay
-   and opens your browser to it:
+   and opens a driven Chromium window to it — the very window the agent's
+   browser tools see and drive. (No Chromium/Chrome installed? It falls back
+   to your default browser and tells the agent to suggest installing one.)
 
    > *"start isore in front of my app on :3000, then await my notes and fix them"*
 
