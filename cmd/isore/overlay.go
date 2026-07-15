@@ -115,15 +115,37 @@ const overlayJS = `
         'box-shadow:0 0 8px rgba(255,59,48,0.15);',
         'transition:all .12s ease-out}',
       '',
+      '[data-es=launcher]{position:fixed;right:16px;bottom:16px;z-index:2147483647;',
+        'width:44px;height:44px;border-radius:14px;cursor:pointer;border:none;padding:0;',
+        'background:linear-gradient(135deg,#7c6bfb,#5a3ff0);',
+        'box-shadow:0 4px 16px rgba(90,63,240,.4),0 0 0 1px rgba(255,255,255,0.08);',
+        'display:flex;align-items:center;justify-content:center;',
+        'font:700 15px/1 system-ui,-apple-system,sans-serif;color:#fff;',
+        'transition:transform .15s ease,box-shadow .15s ease;',
+        'animation:es-fadeIn .15s ease-out}',
+      '[data-es=launcher]:hover{transform:scale(1.06);box-shadow:0 6px 20px rgba(90,63,240,.5),0 0 0 1px rgba(255,255,255,0.1)}',
+      '[data-es=launcher] .es-launcher-badge{position:absolute;top:-4px;right:-4px;',
+        'min-width:16px;height:16px;border-radius:999px;background:#ff3b30;color:#fff;',
+        'font:700 9.5px/16px system-ui,-apple-system,sans-serif;text-align:center;padding:0 3px;',
+        'box-shadow:0 0 0 2px #1e1e1e}',
       '[data-es=toolbar]{position:fixed;right:16px;bottom:16px;z-index:2147483647;',
-        'background:#1e1e1e;border-radius:12px;',
+        'background:#1e1e1e;border-radius:14px;',
         'box-shadow:0 4px 20px rgba(0,0,0,.45),0 0 0 1px rgba(255,255,255,0.06);',
         'backdrop-filter:blur(8px);padding:12px 14px;',
         'width:fit-content;max-width:250px;',
         'font:12px/1.4 system-ui,-apple-system,sans-serif;',
         'animation:es-fadeIn .15s ease-out}',
       '.es-toolbar-row{display:flex;align-items:center;gap:8px}',
-      '.es-toolbar-title{font:600 12px/1 system-ui,-apple-system,sans-serif;color:#e8e8e8;white-space:nowrap}',
+      '.es-brand{display:flex;align-items:center;gap:7px;flex:1;min-width:0}',
+      '.es-brand-mark{flex-shrink:0;width:20px;height:20px;border-radius:6px;',
+        'background:linear-gradient(135deg,#7c6bfb,#5a3ff0);',
+        'display:flex;align-items:center;justify-content:center;',
+        'font:700 11px/1 system-ui,-apple-system,sans-serif;color:#fff}',
+      '.es-wordmark{font:600 13px/1 system-ui,-apple-system,sans-serif;color:#e8e8e8;',
+        'letter-spacing:.2px;white-space:nowrap}',
+      '.es-minimize{flex-shrink:0;background:none;border:none;cursor:pointer;',
+        'color:#666;font:14px/1 system-ui,-apple-system,sans-serif;padding:2px 4px;border-radius:4px}',
+      '.es-minimize:hover{color:#ccc;background:rgba(255,255,255,0.06)}',
       '.es-toolbar-desc{font:11px/1.35 system-ui,-apple-system,sans-serif;',
         'color:#777;margin:6px 0 4px}',
       '.es-toolbar-status{font:11px/1.35 system-ui,-apple-system,sans-serif;',
@@ -162,13 +184,13 @@ const overlayJS = `
       '.es-switch .es-slider:before{content:"";position:absolute;',
         'width:16px;height:16px;border-radius:50%;left:2px;top:2px;',
         'background:#888;transition:all .2s ease}',
-      '.es-switch input:checked+.es-slider{background:#1a7f4b}',
+      '.es-switch input:checked+.es-slider{background:#5a3ff0}',
       '.es-switch input:checked+.es-slider:before{transform:translateX(16px);background:#fff}',
       '',
       '.es-toolbar-foot{margin-top:2px}',
       '[data-es=dispatch]{border:none;border-radius:7px;cursor:pointer;width:100%;',
         'font:600 12px/1 system-ui,-apple-system,sans-serif;',
-        'color:#fff;background:#ff3b30;',
+        'color:#fff;background:#5a3ff0;',
         'padding:8px 0;white-space:nowrap;',
         'transition:all .2s ease}',
       '[data-es=dispatch]:not(:disabled):hover{filter:brightness(1.15)}',
@@ -213,7 +235,7 @@ const overlayJS = `
         'padding:8px 10px;background:#141414;color:#e8e8e8;',
         'border:1px solid #333;border-radius:6px;resize:vertical;',
         'outline:none;transition:border-color .15s ease}',
-      '[data-es=inline] textarea:focus{border-color:#ff3b30}',
+      '[data-es=inline] textarea:focus{border-color:#7c6bfb}',
       '[data-es=inline] textarea::placeholder{color:#555}',
       '.es-inline-actions{display:flex;gap:6px;justify-content:flex-end;margin-top:10px}',
       '.es-inline-shortcut{font-size:10px;color:#555;margin-top:6px;text-align:right}'
@@ -228,7 +250,7 @@ const overlayJS = `
       '@keyframes es-scaleIn{from{opacity:0;transform:scale(0.5)}to{opacity:1;transform:scale(1)}}',
       '@keyframes es-flash{0%,100%{outline:2px solid transparent}',
         '50%{outline:3px solid rgba(255,59,48,0.8)}}',
-      '[data-es=badge]{position:absolute;top:-9px;right:-9px;',
+      '[data-es=badge]{position:fixed;',
         'min-width:20px;height:20px;border-radius:999px;padding:0 5px;',
         'background:#e5484d;color:#fff;',
         'display:flex;align-items:center;justify-content:center;',
@@ -258,15 +280,18 @@ const overlayJS = `
   function storageKey(){return 'es_notes_'+location.href;}
   function save(){
     try{localStorage.setItem(storageKey(),JSON.stringify(notes));
-        localStorage.setItem('es_enabled',enabled?'1':'0');}catch(_){}
+        localStorage.setItem('es_enabled',enabled?'1':'0');
+        localStorage.setItem('es_collapsed',collapsed?'1':'0');}catch(_){}
   }
   function load(){
     try{var s=localStorage.getItem(storageKey());if(s)notes=JSON.parse(s)||[];
-        var e=localStorage.getItem('es_enabled');enabled=e==='1';}catch(_){notes=[];}
+        var e=localStorage.getItem('es_enabled');enabled=e==='1';
+        var c=localStorage.getItem('es_collapsed');collapsed=c===null?true:c==='1';}catch(_){notes=[];}
   }
 
   // ── DOM scaffold ───────────────────────────────────────────
   var host=null,root=null,hi=null,toolbar=null,toggleInput=null,dispatchBtn=null;
+  var badgeLayer=null,launcher=null,collapsed=true;
 
   function ensure(){
     if(!document.body)return;
@@ -275,24 +300,44 @@ const overlayJS = `
       root=host.attachShadow({mode:'open'});
       document.body.appendChild(host);
     }
+    if(!badgeLayer||!document.body.contains(badgeLayer)){
+      badgeLayer=document.createElement('div');badgeLayer.setAttribute('data-es','badge-layer');
+      badgeLayer.style.cssText='position:fixed;top:0;left:0;width:0;height:0;overflow:visible;z-index:2147483640;pointer-events:none';
+      document.body.appendChild(badgeLayer);
+    }
     injectShadowStyles();
     injectLightStyles();
     if(!hi||!root.contains(hi)){
       hi=document.createElement('div');hi.setAttribute('data-es','hi');
       root.appendChild(hi);
     }
+    if(!launcher||!root.contains(launcher)){
+      launcher=document.createElement('button');launcher.setAttribute('data-es','launcher');
+      launcher.type='button';launcher.textContent='is';launcher.title='isore';
+      launcher.addEventListener('click',function(ev){
+        ev.preventDefault();ev.stopPropagation();collapsed=false;save();applyCollapsed();
+      },true);
+      root.appendChild(launcher);
+    }
     if(!toolbar||!root.contains(toolbar)){
       toolbar=document.createElement('div');toolbar.setAttribute('data-es','toolbar');
 
       var row=document.createElement('div');row.className='es-toolbar-row';
+      var brand=document.createElement('div');brand.className='es-brand';
+      var mark=document.createElement('span');mark.className='es-brand-mark';mark.textContent='is';
+      var word=document.createElement('span');word.className='es-wordmark';word.textContent='isore';
+      brand.appendChild(mark);brand.appendChild(word);
       var sw=document.createElement('label');sw.className='es-switch';
       toggleInput=document.createElement('input');toggleInput.type='checkbox';
       toggleInput.addEventListener('change',function(ev){ev.stopPropagation();toggle();},true);
       var slider=document.createElement('span');slider.className='es-slider';
       sw.appendChild(toggleInput);sw.appendChild(slider);
-      var title=document.createElement('span');title.className='es-toolbar-title';
-      title.textContent='UI Annotator';
-      row.appendChild(sw);row.appendChild(title);
+      var minBtn=document.createElement('button');minBtn.className='es-minimize';minBtn.type='button';
+      minBtn.textContent='–';minBtn.title='Minimize';
+      minBtn.addEventListener('click',function(ev){
+        ev.preventDefault();ev.stopPropagation();collapsed=true;save();applyCollapsed();
+      },true);
+      row.appendChild(brand);row.appendChild(sw);row.appendChild(minBtn);
 
       var desc=document.createElement('div');desc.className='es-toolbar-desc';
       desc.innerHTML='Click elements to annotate.';
@@ -411,7 +456,20 @@ const overlayJS = `
       }
     }
     if(hi)hi.style.display='none';
-    renderBadges();renderStatus();renderPanel();
+    renderBadges();renderStatus();renderPanel();applyCollapsed();
+  }
+
+  function applyCollapsed(){
+    if(toolbar)toolbar.style.display=collapsed?'none':'block';
+    if(!launcher)return;
+    launcher.style.display=collapsed?'flex':'none';
+    var pending=0;
+    notes.forEach(function(n){if(!n.fixedAt)pending++;});
+    var badge=launcher.querySelector('.es-launcher-badge');
+    if(pending>0){
+      if(!badge){badge=document.createElement('span');badge.className='es-launcher-badge';launcher.appendChild(badge);}
+      badge.textContent=String(pending);
+    }else if(badge){badge.remove();}
   }
 
   // ── badges ─────────────────────────────────────────────────
@@ -424,32 +482,54 @@ const overlayJS = `
       if(!keep[b.getAttribute('data-es-id')])b.remove();
     });
     document.querySelectorAll('[data-es-marked]').forEach(function(el){
-      var has=false,bs=el.querySelectorAll('[data-es=badge]');
-      for(var j=0;j<bs.length;j++){if(keep[bs[j].getAttribute('data-es-id')]){has=true;break;}}
+      var has=false,bs=badgeLayer.querySelectorAll('[data-es=badge]');
+      for(var j=0;j<bs.length;j++){if(bs[j].__esEl===el&&keep[bs[j].getAttribute('data-es-id')]){has=true;break;}}
       if(!has)el.removeAttribute('data-es-marked');
     });
     if(!enabled)return;
     notes.forEach(function(n,i){
       try{
         var el=document.querySelector(n.selector);if(!el)return;
-        var badge=null,curr=el.querySelectorAll('[data-es=badge]');
+        var badge=null,curr=badgeLayer.querySelectorAll('[data-es=badge]');
         for(var j=0;j<curr.length;j++){if(curr[j].getAttribute('data-es-id')===n.id){badge=curr[j];break;}}
         if(!badge){
-          if(!el.style.position||el.style.position==='static')el.style.position='relative';
           badge=document.createElement('div');badge.setAttribute('data-es','badge');
           badge.setAttribute('data-es-id',n.id);
+          badge.style.pointerEvents='auto';
           badge.addEventListener('mouseenter',function(ev){ev.stopPropagation();showPopover(el,badge.__esNote);},true);
           badge.addEventListener('mouseleave',function(){scheduleHidePopover();},true);
-          el.appendChild(badge);
+          badgeLayer.appendChild(badge);
         }
         var state=n.agentStatus==='working'?'working':(n.fixedAt?'fixed':'pending');
-        badge.__esNote=n;
+        badge.__esNote=n;badge.__esEl=el;
         badge.textContent=String(i+1);
         badge.setAttribute('data-es-state',state);
         el.setAttribute('data-es-marked',state);
+        positionBadge(badge,el);
       }catch(_){}
     });
   }
+
+  function positionBadge(badge,el){
+    var r=el.getBoundingClientRect();
+    badge.style.left=(r.right-9)+'px';
+    badge.style.top=(r.top-9)+'px';
+  }
+
+  function repositionBadges(){
+    if(!badgeLayer)return;
+    badgeLayer.querySelectorAll('[data-es=badge]').forEach(function(b){
+      if(b.__esEl)positionBadge(b,b.__esEl);
+    });
+  }
+  // Badges must track their target element through ANY layout change, not
+  // just scroll/resize: the page's own JS can toggle a class or animate a
+  // transition (e.g. opening a side menu) with no scroll/resize event at
+  // all, so a rAF loop is the only reliable way to stay glued to it.
+  (function repositionLoop(){
+    repositionBadges();
+    requestAnimationFrame(repositionLoop);
+  })();
 
   // ── hover popover ──────────────────────────────────────────
   var popEl=null,popTimer=null;
