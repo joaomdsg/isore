@@ -234,7 +234,8 @@ func TestAgentActivityWrittenByAnotherProcessShowsUpInTheOverlay(t *testing.T) {
 
 	require.NoError(t, st.MarkFixed("es_1", 500, "made it green"))
 	got = waitFor(t, events, "notes")
-	assert.Contains(t, got, `"agentSummary":"made it green"`)
+	assert.Contains(t, got, `"kind":"summary"`)
+	assert.Contains(t, got, `"text":"made it green"`)
 }
 
 func TestQuietStoresSendNoNoteEventsSoTabsDoNotChurn(t *testing.T) {
@@ -294,8 +295,13 @@ func TestDeleteOfAnUnknownIDIsRejected(t *testing.T) {
 func TestADeletedNoteIsBroadcastToOpenTabs(t *testing.T) {
 	t.Parallel()
 	base, st := start(t, appServing("text/html", "<body></body>"))
-	require.NoError(t, st.Merge([]notes.Note{{ID: "es_1", Note: "fix", DispatchedAt: 5}}))
 	tab := sse(t, base)
+	require.NoError(t, st.Merge([]notes.Note{{ID: "es_1", Note: "fix", DispatchedAt: 5}}))
+	// A deletion is only broadcast for a note the watcher has already seen
+	// (a note added and deleted within one poll window was never announced,
+	// so tabs have nothing to drop). Wait until the watcher announces the
+	// note before deleting it — as any real tab would have.
+	waitFor(t, tab, "notes")
 
 	resp, err := http.Post(base+"/__isore/delete", "application/json", strings.NewReader(`{"id":"es_1"}`))
 	require.NoError(t, err)
@@ -349,4 +355,13 @@ func TestASecondDispatchThroughTheProxyKeepsTheFirst(t *testing.T) {
 	all, err := st.Load()
 	require.NoError(t, err)
 	assert.Len(t, all, 2, "the dispatch endpoint must merge, never overwrite")
+}
+
+func TestFontRouteServesAnEmbeddedWoff2(t *testing.T) {
+	t.Parallel()
+	base, _ := start(t, appServing("text/html", "<body></body>"))
+	status, header, body := get(t, base+"/__isore/fonts/space-grotesk-600.woff2")
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "font/woff2", header.Get("Content-Type"))
+	assert.NotEmpty(t, body)
 }

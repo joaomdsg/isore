@@ -221,3 +221,89 @@ func TestAddCommentOnUnknownIDFails(t *testing.T) {
 	_, err := notes.AddComment([]notes.Note{n("a", 100, 0)}, "nope", "x", 500)
 	assert.Error(t, err)
 }
+
+func withThread(base notes.Note, entries ...notes.ThreadEntry) notes.Note {
+	base.Thread = append([]notes.ThreadEntry{}, entries...)
+	return base
+}
+
+func TestPendingNudgesArePersistedSoAReloadCannotLoseThem(t *testing.T) {
+	t.Parallel()
+	// A saved-but-undispatched nudge is POSTed and stored server-side; the
+	// overlay restores it from /__isore/notes on reconcile after a reload.
+	fixed := withThread(n("a", 100, 150),
+		notes.ThreadEntry{Kind: notes.EntrySummary, Text: "Snapped to the baseline.", At: 150})
+	nudged := withThread(fixed,
+		notes.ThreadEntry{Kind: notes.EntrySummary, Text: "Snapped to the baseline.", At: 150},
+		notes.ThreadEntry{Kind: notes.EntryNudge, Base: "Snapped to the baseline.", Text: "Snapped to the baseline, aligned to the 8px grid.", At: 300})
+
+	merged := notes.Merge([]notes.Note{fixed}, []notes.Note{nudged})
+
+	require.Len(t, merged, 1)
+	assert.Equal(t, "Snapped to the baseline, aligned to the 8px grid.", notes.PendingNudge(merged[0]))
+	assert.EqualValues(t, 100, merged[0].DispatchedAt, "an undispatched nudge keeps the old dispatch stamp")
+	assert.True(t, notes.Open(merged[0]), "a pending nudge reopens the note")
+
+	round, ok := notes.Parse(mustJSON(t, merged))
+	require.True(t, ok)
+	assert.Equal(t, notes.PendingNudge(merged[0]), notes.PendingNudge(round[0]), "the nudge must survive a JSON round-trip")
+}
+
+func TestNewSinceDeliversDispatchedNudgesButNotPendingOnes(t *testing.T) {
+	t.Parallel()
+	dispatched := withThread(n("a", 100, 150),
+		notes.ThreadEntry{Kind: notes.EntrySummary, Text: "s", At: 150},
+		notes.ThreadEntry{Kind: notes.EntryNudge, Base: "s", Text: "better summary", At: 380})
+	dispatched.DispatchedAt = 400 // re-dispatched past the checkpoint
+	pending := withThread(n("b", 100, 150),
+		notes.ThreadEntry{Kind: notes.EntrySummary, Text: "s", At: 150},
+		notes.ThreadEntry{Kind: notes.EntryNudge, Base: "s", Text: "draft nudge", At: 350})
+	// pending.DispatchedAt stays 100: saved, not yet dispatched.
+	plainFixed := withThread(n("c", 100, 150),
+		notes.ThreadEntry{Kind: notes.EntrySummary, Text: "s", At: 150})
+
+	out := notes.NewSince([]notes.Note{dispatched, pending, plainFixed}, 200)
+
+	require.Len(t, out, 1)
+	assert.Equal(t, "a", out[0].ID)
+}
+
+func TestMarkFixedResolvesADispatchedNudgeByAppendingANewSummary(t *testing.T) {
+	t.Parallel()
+	nt := withThread(n("a", 100, 150),
+		notes.ThreadEntry{Kind: notes.EntrySummary, Text: "old summary", At: 150},
+		notes.ThreadEntry{Kind: notes.EntryNudge, Base: "old summary", Text: "new summary", At: 380})
+	nt.DispatchedAt = 400
+	nt.AgentStatus = notes.StatusWorking
+
+	updated, err := notes.MarkFixed([]notes.Note{nt}, "a", 500, "new summary")
+
+	require.NoError(t, err)
+	got := updated[0]
+	assert.Equal(t, "new summary", notes.LatestSummary(got))
+	assert.Empty(t, notes.PendingNudge(got), "the nudge is answered by the new summary")
+	assert.Len(t, got.Thread, 3, "summary, nudge, summary — history is kept, not overwritten")
+	assert.EqualValues(t, 500, got.FixedAt, "re-fix restamps so Diff broadcasts the resolution")
+	assert.Equal(t, notes.StatusFixed, got.AgentStatus)
+	assert.False(t, notes.Open(got))
+}
+
+func TestMarkFixedWithoutANudgeIsStillANoOpOnSecondFix(t *testing.T) {
+	t.Parallel()
+	nt := withThread(n("a", 100, 150),
+		notes.ThreadEntry{Kind: notes.EntrySummary, Text: "first summary", At: 150})
+
+	updated, err := notes.MarkFixed([]notes.Note{nt}, "a", 500, "second summary")
+
+	require.NoError(t, err)
+	assert.Equal(t, "first summary", notes.LatestSummary(updated[0]))
+	assert.Len(t, updated[0].Thread, 1, "no intervening nudge → no second summary")
+	assert.EqualValues(t, 150, updated[0].FixedAt)
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return b
+}

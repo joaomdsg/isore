@@ -17,6 +17,24 @@ type Comment struct {
 	At   int64  `json:"at"`
 }
 
+// Thread entry kinds.
+const (
+	EntrySummary = "summary" // an agent outcome, appended on mark_fixed
+	EntryNudge   = "nudge"   // a user revision of the prior summary
+)
+
+// ThreadEntry is one item in a note's chronological history. A summary is an
+// agent outcome appended when work is marked fixed; a nudge is the user's edit
+// of the prior summary, kept as Base→Text so the overlay can render it as a
+// tracked-change diff. The thread never overwrites — every fix and every nudge
+// appends — so the whole back-and-forth on a note is preserved and shown.
+type ThreadEntry struct {
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+	Base string `json:"base,omitempty"` // nudge only: the summary text it revises
+	At   int64  `json:"at"`
+}
+
 // Note is one UI annotation. FixedAt is zero until an agent marks it fixed.
 type Note struct {
 	ID           string    `json:"id"`
@@ -29,8 +47,48 @@ type Note struct {
 	DispatchedAt int64     `json:"dispatchedAt"`
 	FixedAt      int64     `json:"fixedAt,omitempty"`
 	AgentStatus  string    `json:"agentStatus,omitempty"`
-	AgentSummary string    `json:"agentSummary,omitempty"`
 	Comments     []Comment `json:"comments,omitempty"`
+
+	// Thread is the note's chronological history of agent summaries and user
+	// nudges. A nudge is persisted the moment it is saved — before dispatch —
+	// so a page reload cannot lose it; the overlay restores it on reconcile.
+	// DispatchedAt is re-stamped when a nudge is handed back to the agent, so
+	// a nudge whose At is newer than DispatchedAt is still pending.
+	Thread []ThreadEntry `json:"thread,omitempty"`
+}
+
+// Open reports whether a note still has outstanding work. A note that has never
+// been fixed (FixedAt zero — including one reopened by a re-dispatch, which
+// zeroes FixedAt) is open. A fixed note is open again only while its latest
+// thread entry is a nudge awaiting a new summary. This single predicate drives
+// the overlay's open count, the badge state, and the mark_* guards, so "open"
+// means the same thing on both sides of the wire.
+func Open(n Note) bool {
+	if n.FixedAt == 0 {
+		return true
+	}
+	return len(n.Thread) > 0 && n.Thread[len(n.Thread)-1].Kind != EntrySummary
+}
+
+// LatestSummary returns the text of the most recent summary entry, or "".
+func LatestSummary(n Note) string {
+	for i := len(n.Thread) - 1; i >= 0; i-- {
+		if n.Thread[i].Kind == EntrySummary {
+			return n.Thread[i].Text
+		}
+	}
+	return ""
+}
+
+// PendingNudge returns the text of a nudge awaiting an agent answer (the last
+// thread entry is a nudge), or "".
+func PendingNudge(n Note) string {
+	if len(n.Thread) > 0 {
+		if last := n.Thread[len(n.Thread)-1]; last.Kind == EntryNudge {
+			return last.Text
+		}
+	}
+	return ""
 }
 
 // Merge upserts incoming dispatched notes into the existing store contents.
@@ -65,18 +123,23 @@ func Pending(all []Note) []Note {
 	return out
 }
 
-// MarkFixed stamps the note with the given id as fixed at now (unix ms) with
-// the agent's summary, returning an updated copy. A second fix is a no-op:
-// the first stamp and summary stand. An unknown id is an error.
+// MarkFixed appends the agent's summary to the note's thread and stamps it
+// fixed at now (unix ms), returning an updated copy. It resolves both a first
+// fix and a re-worked nudge: either way the summary becomes the new latest
+// entry, closing the note. A fix on an already-settled note (no open work) is
+// a no-op, so a duplicate mark_fixed never appends a second summary. An unknown
+// id is an error.
 func MarkFixed(all []Note, id string, now int64, summary string) ([]Note, error) {
 	updated := make([]Note, len(all))
 	copy(updated, all)
 	for i := range updated {
 		if updated[i].ID == id {
-			if updated[i].FixedAt == 0 {
-				updated[i].FixedAt = now
-				updated[i].AgentSummary = summary
+			if !Open(updated[i]) {
+				return updated, nil
 			}
+			updated[i].Thread = append(append([]ThreadEntry{}, updated[i].Thread...),
+				ThreadEntry{Kind: EntrySummary, Text: summary, At: now})
+			updated[i].FixedAt = now
 			updated[i].AgentStatus = StatusFixed
 			return updated, nil
 		}
@@ -112,11 +175,16 @@ func AddComment(all []Note, id string, text string, now int64) ([]Note, error) {
 	return nil, fmt.Errorf("no note with id %q", id)
 }
 
-// NewSince returns pending notes dispatched strictly after since (unix ms).
+// NewSince returns the notes that are new agent work dispatched strictly after
+// since (unix ms): open notes whose DispatchedAt is past the checkpoint. This
+// spans both a first dispatch (empty thread, FixedAt zero) and a re-dispatched
+// nudge, since the overlay re-stamps DispatchedAt on every hand-off. A
+// saved-but-undispatched nudge keeps its old DispatchedAt, so it is not work
+// yet.
 func NewSince(all []Note, since int64) []Note {
 	var out []Note
 	for _, n := range all {
-		if n.FixedAt == 0 && n.DispatchedAt > since {
+		if Open(n) && n.DispatchedAt > since {
 			out = append(out, n)
 		}
 	}

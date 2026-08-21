@@ -3,7 +3,6 @@
 package store
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/joaomdsg/isore/internal/notes"
 )
@@ -117,25 +115,6 @@ func (s *Store) AddComment(id string, text string, now int64) error {
 		}
 		return s.write(updated)
 	})
-}
-
-// Await polls until a pending note dispatched after since (unix ms) appears,
-// returning the fresh notes. Context expiry is a normal empty result.
-func (s *Store) Await(ctx context.Context, since int64, poll time.Duration) ([]notes.Note, error) {
-	for {
-		all, err := s.Load()
-		if err != nil {
-			return nil, err
-		}
-		if fresh := notes.NewSince(all, since); len(fresh) > 0 {
-			return fresh, nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil, nil
-		case <-time.After(poll):
-		}
-	}
 }
 
 // locked serializes read-modify-write cycles across goroutines AND processes

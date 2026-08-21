@@ -45,6 +45,6 @@ func TestTheAgentsSummaryReachesTheStoreForTheOverlayToShow(t *testing.T) {
 	all, err := s.Load()
 	require.NoError(t, err)
 	require.Len(t, all, 1)
-	assert.Equal(t, "made it green", all[0].AgentSummary)
+	assert.Equal(t, "made it green", notes.LatestSummary(all[0]))
 	assert.Equal(t, notes.StatusFixed, all[0].AgentStatus)
 }

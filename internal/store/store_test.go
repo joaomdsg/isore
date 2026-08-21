@@ -1,13 +1,11 @@
 package store_test
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/joaomdsg/isore/internal/notes"
 	"github.com/joaomdsg/isore/internal/store"
@@ -187,46 +185,4 @@ func TestConcurrentFixesAllStick(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 3, fixed, "a fix that reported success must never be silently undone")
-}
-
-func TestAwaitWakesWhenANewNoteIsDispatched(t *testing.T) {
-	t.Parallel()
-	s := newStore(t)
-	require.NoError(t, s.Merge([]notes.Note{n("old", 100)}))
-
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		_ = s.Merge([]notes.Note{n("fresh", 999)})
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	got, err := s.Await(ctx, 100, 5*time.Millisecond)
-	require.NoError(t, err)
-	require.Len(t, got, 1)
-	assert.Equal(t, "fresh", got[0].ID)
-}
-
-func TestAwaitReturnsImmediatelyWhenFreshNotesAlreadyExist(t *testing.T) {
-	t.Parallel()
-	s := newStore(t)
-	require.NoError(t, s.Merge([]notes.Note{n("fresh", 300)}))
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	start := time.Now()
-	got, err := s.Await(ctx, 200, time.Second)
-	require.NoError(t, err)
-	require.Len(t, got, 1)
-	assert.Less(t, time.Since(start), 500*time.Millisecond,
-		"must check before the first poll sleep")
-}
-
-func TestAwaitTimesOutEmptyHandedWithoutError(t *testing.T) {
-	t.Parallel()
-	s := newStore(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	got, err := s.Await(ctx, 0, 5*time.Millisecond)
-	require.NoError(t, err, "an empty wait is a normal outcome for an agent, not a failure")
-	assert.Empty(t, got)
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/joaomdsg/isore/internal/proxy"
@@ -73,6 +75,30 @@ func (h *proxyHolder) start(target *url.URL, listen string, st *store.Store, ove
 	return base, nil
 }
 
+// maxPortScan bounds how far startOnFreePort probes upward before giving up,
+// so a machine with no nearby free port fails loudly instead of looping.
+const maxPortScan = 64
+
+// startOnFreePort binds the proxy at startPort, scanning upward past any port
+// already held by another isore instance (EADDRINUSE) until one is free — so
+// concurrent per-project instances on one machine don't collide. Returns the
+// bound base URL and the port actually used. Non-EADDRINUSE bind errors surface
+// immediately rather than being masked by the scan.
+func (h *proxyHolder) startOnFreePort(target *url.URL, host string, startPort int, st *store.Store, overlay []byte, poll time.Duration, opts ...proxy.Option) (string, int, error) {
+	var err error
+	for port := startPort; port < startPort+maxPortScan; port++ {
+		var base string
+		base, err = h.start(target, fmt.Sprintf("%s:%d", host, port), st, overlay, poll, opts...)
+		if err == nil {
+			return base, port, nil
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			return "", 0, err
+		}
+	}
+	return "", 0, fmt.Errorf("no free port in [%d,%d): %w", startPort, startPort+maxPortScan, err)
+}
+
 // reload refreshes every connected tab of the in-process proxy. Returns false
 // when no proxy has been started, letting the caller fall back to an
 // externally-run proxy's reload endpoint.
@@ -91,11 +117,6 @@ type listIn struct{}
 
 type notesOut struct {
 	Notes []serve.NoteView `json:"notes"`
-}
-
-type awaitIn struct {
-	SinceMs        int64 `json:"sinceMs,omitempty" jsonschema:"only notes dispatched after this unix-ms timestamp; 0 means anything dispatched from now on"`
-	TimeoutSeconds int   `json:"timeoutSeconds,omitempty" jsonschema:"how long to wait before returning empty; default 120"`
 }
 
 type markFixedIn struct {
@@ -128,21 +149,23 @@ type markFixedOut struct {
 }
 
 // instructions is surfaced to the connecting model on initialize. It describes
-// the loop the agent runs itself: block on await_notes, fix the batch, repeat.
+// the loop the agent runs itself: subscribe, fix each batch, repeat.
 // No subagents — handing notes to workers loses the conversation's context.
 const instructions = `Isore turns a user's live browser annotations into coding tasks. The user clicks an element in their running web app, writes a note about what to change, and hits Dispatch. You fix the code and their page updates live: badges turn blue the instant a note is dispatched, amber once you call mark_working, and green with your summary when done. The overlay freezes from the moment of dispatch (not just while you work), so the user cannot annotate or re-dispatch until you finish the batch — finish it promptly.
 
 The user can attach follow-up comments to an already-dispatched note instead of rewriting it — read a note's "comments" field (oldest first) for that running context; the original "note" text never changes underneath you.
 
-Do ALL of this yourself, in the main conversation. Do NOT delegate dispatches to subagents or background workers: they lack your context about the codebase and the session.
+Do ALL of the fixing yourself, in the main conversation. Do NOT delegate dispatches — the actual code changes — to subagents or background workers: they lack your context about the codebase and the session.
 
-1. SETUP (once): call start_proxy(targetPort, proxyPort). targetPort is the user's dev-server port; proxyPort is where the annotated app is served (defaults 3000 and 4400). It opens a driven Chromium window showing the overlay — the same window your browser_* tools drive. If its result warns that no drivable browser was found, relay the warning and the install suggestion to the user before continuing. Then call list_notes and act (step 3) on anything already pending.
+1. SETUP (once): call start_proxy(targetPort, proxyPort). targetPort is the user's dev-server port; proxyPort is where the annotated app is served (defaults 3000 and 4400). It opens a driven Chromium window showing the overlay — the same window your browser_* tools drive. Its result includes the notes store path and the exact 'isore subscribe' command for step 2. If its result warns that no drivable browser was found, relay the warning and the install suggestion to the user before continuing. Then call list_notes and act (step 3) on anything already pending.
 
-2. LISTEN: call await_notes(sinceMs). It BLOCKS until the user dispatches, or returns empty on timeout; on empty, call it again to keep listening. Pass sinceMs=0 on the first call (means "anything from now on"); afterwards pass the largest dispatchedAt you have already handled, so you never reprocess a batch.
+2. STAY CONNECTED WITH ONE PERSISTENT LISTENER: run the 'isore subscribe' command printed by start_proxy EXACTLY ONCE, as a single long-lived background listener (a Monitor), and keep it alive for the whole session. It opens ONE connection to the proxy's SSE stream and prints one JSON batch per dispatch the instant the user hits Dispatch, WITHOUT ever closing the channel — so each dispatch reaches you as a fresh line on that same open connection while you stay idle or work on something else. Do NOT re-run it per dispatch and do NOT run it in the foreground: one command, always connected, streaming every batch. Each printed line is one dispatch batch — parse it as a list of notes and act on it (step 3). The listener already checkpoints internally, so you never pass sinceMs or reprocess a batch. Relaunch it only if it exits — which happens when the proxy goes away; after any new start_proxy, start a fresh listener with the newly printed command (the proxy port may have changed). This CLI listener is the ONLY way to receive dispatches — there is no MCP tool for it.
 
 3. ACT on the returned batch (all notes from one Dispatch). For each note: call mark_working(id) first (badge turns amber, so the user knows you picked it up); get_screenshot(id) to see exactly what the user saw at dispatch; use the note's note/selector/label/url to make the code change; verify against the live page with browser_screenshot / browser_eval / browser_html if useful; then mark_fixed(id, summary) with a short, user-facing summary (badge turns green, the summary shows in the overlay, and once every note is fixed the overlay thaws).
 
-4. When the whole batch is fixed and the app has rebuilt, call reload_page once so the user's tabs refresh, then go back to step 2.
+4. When the whole batch is fixed and the app has rebuilt, call reload_page once so the user's tabs refresh, then simply wait — your persistent listener from step 2 is still connected and will hand you the next dispatch as a new line. Never start a second listener.
+
+5. THE CORRECTION LOOP: a fixed note is not necessarily final. The user can edit your summary in the overlay and hand it back — it comes back to you as a "correction" field on that note (your original summary is preserved separately). Treat a returned correction like a fresh note: read it as the user's own words describing what's still wrong or what to adjust, rework the fix accordingly, then call mark_fixed again with a new summary — this both resolves the correction and re-triggers the green badge/reload for that note. A note with no "correction" field needs no further action.
 
 Notes: the store is safe under concurrent mark_working/mark_fixed calls. reload_page works only after start_proxy has been called. Keep summaries short — the user reads them in the overlay.`
 
@@ -173,7 +196,8 @@ func runMCP(args []string) error {
 	shoot := func(pageURL, selector string) ([]byte, error) {
 		shootMu.Lock()
 		defer shootMu.Unlock()
-		d, err := shootPool.get(context.Background())
+		d, release, err := shootPool.get(context.Background())
+		defer release()
 		if err != nil {
 			return nil, err
 		}
@@ -188,20 +212,6 @@ func runMCP(args []string) error {
 		Description: "List pending UI annotations the user dispatched from the isore overlay: what to change, on which element (CSS selector). ALWAYS call get_screenshot for each note to see what the user saw, then fix and call mark_fixed.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ listIn) (*mcp.CallToolResult, notesOut, error) {
 		ns, err := h.ListNotes(ctx)
-		return nil, notesOut{Notes: ns}, err
-	})
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "await_notes",
-		Description: "Block until the user dispatches new annotations from the isore overlay, then return them. Empty result means the wait timed out — call again to keep listening.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, in awaitIn) (*mcp.CallToolResult, notesOut, error) {
-		timeout := 120 * time.Second
-		if in.TimeoutSeconds > 0 {
-			timeout = time.Duration(in.TimeoutSeconds) * time.Second
-		}
-		waitCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		ns, err := h.Await(waitCtx, in.SinceMs)
 		return nil, notesOut{Notes: ns}, err
 	})
 
@@ -227,7 +237,7 @@ func runMCP(args []string) error {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "start_proxy",
-		Description: "Start isore in proxy mode: run a reverse proxy that injects the annotation overlay in front of the user's dev server, and open a driven Chromium window to it (the same window the browser_* tools drive; falls back to the default browser with a warning if no Chromium/Chrome is installed). Pass the port your dev server listens on (targetPort) and the port to serve the annotated app on (proxyPort). Calling again restarts the proxy on the new ports. After it returns, call await_notes to receive the user's annotations.",
+		Description: "Start isore in proxy mode: run a reverse proxy that injects the annotation overlay in front of the user's dev server, and open a driven Chromium window to it (the same window the browser_* tools drive; falls back to the default browser with a warning if no Chromium/Chrome is installed). Pass the port your dev server listens on (targetPort) and the port to serve the annotated app on (proxyPort). Calling again restarts the proxy on the new ports. After it returns, run `isore subscribe` as a persistent background listener to receive the user's annotations.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in startProxyIn) (*mcp.CallToolResult, startProxyOut, error) {
 		targetPort := in.TargetPort
 		if targetPort == 0 {
@@ -241,20 +251,25 @@ func runMCP(args []string) error {
 		if err != nil {
 			return nil, startProxyOut{}, err
 		}
-		listen := fmt.Sprintf("127.0.0.1:%d", proxyPort)
-		base, err := holder.start(target, listen, store.New(*out), []byte(overlayJS), 300*time.Millisecond, proxy.WithShooter(shoot))
+		requestedPort := proxyPort
+		base, actualPort, err := holder.startOnFreePort(target, "127.0.0.1", proxyPort, store.New(*out), []byte(overlayJS), 300*time.Millisecond, proxy.WithShooter(shoot))
 		if err != nil {
-			return nil, startProxyOut{}, fmt.Errorf("start proxy on %s: %w", listen, err)
+			return nil, startProxyOut{}, fmt.Errorf("start proxy near port %d: %w", requestedPort, err)
 		}
+		proxyPort = actualPort
+		h.SetProxyBase(base)
 		warning, d := ub.open(base)
-		msg := fmt.Sprintf("Proxy live: annotating http://127.0.0.1:%d at %s.", targetPort, base)
+		msg := fmt.Sprintf("Proxy live: annotating http://127.0.0.1:%d at %s. Notes store: %s — run `isore subscribe -out %s -proxyPort %d` ONCE as a single persistent background listener (a Monitor): it holds the SSE channel open and prints one JSON batch per dispatch without exiting, so you're notified of every dispatch on one connection. Do not re-run it per dispatch.", targetPort, base, *out, *out, proxyPort)
+		if actualPort != requestedPort {
+			msg += fmt.Sprintf(" (port %d was busy — another isore instance likely holds it — so I used %d instead.)", requestedPort, actualPort)
+		}
 		if d != nil {
 			toolsPool.seed(d)
 			msg += " A driven Chromium window is showing it — your browser_* tools drive that same window."
 		} else {
 			msg += " " + warning
 		}
-		msg += " Ctrl-Shift-N toggles the overlay; call await_notes for dispatches."
+		msg += " Ctrl-Shift-N toggles the overlay; subscribe for dispatches."
 		return nil, startProxyOut{URL: base, Message: msg}, nil
 	})
 

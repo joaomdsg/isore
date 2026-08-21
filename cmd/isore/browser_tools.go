@@ -14,6 +14,10 @@ import (
 // driverPool lazily acquires the browser: attach to the harness's visible
 // Chromium when its handshake file exists, otherwise launch owned headless.
 type driverPool struct {
+	// use is held for reading for as long as a caller drives the driver, and
+	// for writing while seed swaps it — so a driver is never Closed out from
+	// under a call in flight. Lock order is always use before mu.
+	use    sync.RWMutex
 	mu     sync.Mutex
 	d      *browser.Driver
 	outDir string
@@ -22,43 +26,60 @@ type driverPool struct {
 // seed hands the pool an already-running driver (the user's visible browser)
 // so the browser_* tools drive the very window the user is annotating in.
 // Any earlier lazily-launched driver is closed and replaced: the agent must
-// never keep driving an invisible browser once a visible one exists. Safe
-// because MCP tool calls are sequential — no call is mid-flight during seed.
+// never keep driving an invisible browser once a visible one exists.
+//
+// The old driver is closed only once every in-flight caller has released it.
+// MCP tool calls are not guaranteed to be serialized, so a start_proxy racing
+// a browser_* call would otherwise Close the very driver that call is driving.
 func (p *driverPool) seed(d *browser.Driver) {
+	p.use.Lock() // drains in-flight callers; released before any Close
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.d == d {
+	old := p.d
+	if old == d {
+		p.mu.Unlock()
+		p.use.Unlock()
 		return
 	}
-	if p.d != nil {
-		p.d.Close()
-	}
 	p.d = d
+	p.mu.Unlock()
+	p.use.Unlock()
+	if old != nil {
+		old.Close()
+	}
 }
 
-func (p *driverPool) get(ctx context.Context) (*browser.Driver, error) {
+// get returns the pooled driver plus a release func the caller MUST call when
+// it is done driving it (safe to defer immediately: release is never nil, even
+// on error). Until release runs, seed cannot close the returned driver.
+func (p *driverPool) get(ctx context.Context) (*browser.Driver, func(), error) {
+	p.use.RLock()
+	release := p.use.RUnlock
+	fail := func(err error) (*browser.Driver, func(), error) {
+		p.use.RUnlock()
+		return nil, func() {}, err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.d != nil {
-		return p.d, nil
+		return p.d, release, nil
 	}
 	var d *browser.Driver
 	if debugURL, err := browser.ReadEndpoint(filepath.Join(p.outDir, "browser.json")); err == nil {
 		if d, err = browser.Attach(context.Background(), debugURL); err != nil {
-			return nil, err
+			return fail(err)
 		}
 	} else {
 		chrome := browser.FindChrome()
 		if chrome == "" {
-			return nil, fmt.Errorf("no attached browser and no chromium/chrome binary found")
+			return fail(fmt.Errorf("no attached browser and no chromium/chrome binary found"))
 		}
 		var lerr error
 		if d, lerr = browser.Launch(context.Background(), chrome); lerr != nil {
-			return nil, lerr
+			return fail(lerr)
 		}
 	}
 	p.d = d
-	return d, nil
+	return d, release, nil
 }
 
 type screenshotIn struct {
@@ -108,7 +129,8 @@ func addBrowserTools(server *mcp.Server, h *serve.Handlers, pool *driverPool) {
 		Name:        "browser_screenshot",
 		Description: "Capture the live page (or one element) right now — use it to verify your fix actually rendered.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in browserShotIn) (*mcp.CallToolResult, any, error) {
-		d, err := pool.get(ctx)
+		d, release, err := pool.get(ctx)
+		defer release()
 		if err != nil {
 			return nil, nil, err
 		}
@@ -128,7 +150,8 @@ func addBrowserTools(server *mcp.Server, h *serve.Handlers, pool *driverPool) {
 		Name:        "browser_eval",
 		Description: "Run a JavaScript expression in the live page and get its JSON result — inspect state, computed styles, anything the DevTools console could. Also your hands: drive the UI by evaluating clicks, input, form fills (e.g. document.querySelector('button').click()).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in evalIn) (*mcp.CallToolResult, any, error) {
-		d, err := pool.get(ctx)
+		d, release, err := pool.get(ctx)
+		defer release()
 		if err != nil {
 			return nil, nil, err
 		}
@@ -143,7 +166,8 @@ func addBrowserTools(server *mcp.Server, h *serve.Handlers, pool *driverPool) {
 		Name:        "browser_html",
 		Description: "Read the live outer HTML of an element (or the whole document) from the driven browser.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in htmlIn) (*mcp.CallToolResult, any, error) {
-		d, err := pool.get(ctx)
+		d, release, err := pool.get(ctx)
+		defer release()
 		if err != nil {
 			return nil, nil, err
 		}
@@ -158,7 +182,8 @@ func addBrowserTools(server *mcp.Server, h *serve.Handlers, pool *driverPool) {
 		Name:        "browser_navigate",
 		Description: "Point the driven browser at a URL (e.g. the page a note was made on).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in navigateIn) (*mcp.CallToolResult, okOut, error) {
-		d, err := pool.get(ctx)
+		d, release, err := pool.get(ctx)
+		defer release()
 		if err != nil {
 			return nil, okOut{}, err
 		}
@@ -172,7 +197,8 @@ func addBrowserTools(server *mcp.Server, h *serve.Handlers, pool *driverPool) {
 		Name:        "browser_console",
 		Description: "Read recent console output (logs, warnings, errors) from the driven browser — captured from the moment the browser was attached.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in consoleIn) (*mcp.CallToolResult, any, error) {
-		d, err := pool.get(ctx)
+		d, release, err := pool.get(ctx)
+		defer release()
 		if err != nil {
 			return nil, nil, err
 		}

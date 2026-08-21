@@ -55,7 +55,7 @@ func TestOverlayThawsAfterSSEDrop(t *testing.T) {
 	p.waitBool(`window.__es.notes()[0].dispatchedAt>0`, true, "note dispatched")
 
 	require.NoError(t, h.MarkWorking(context.Background(), "n1"))
-	p.waitBool(`__q('.es-switch input').disabled`, true, "overlay frozen via SSE")
+	p.waitBool(`window.__es.frozen()`, true, "overlay frozen via SSE")
 
 	// Proxy dies mid-batch; the agent finishes while the tab is deaf.
 	addr := strings.TrimPrefix(base, "http://")
@@ -66,5 +66,5 @@ func TestOverlayThawsAfterSSEDrop(t *testing.T) {
 	// Proxy returns on the same port; the tab must thaw without a reload.
 	_, err = holder.start(backend, addr, st, []byte(overlayJS), 50*time.Millisecond)
 	require.NoError(t, err)
-	p.waitBool(`__q('.es-switch input').disabled`, false, "overlay thawed after reconnect")
+	p.waitBool(`window.__es.frozen()`, false, "overlay thawed after reconnect")
 }

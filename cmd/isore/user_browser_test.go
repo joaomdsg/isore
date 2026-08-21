@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/joaomdsg/isore/internal/browser"
 	"github.com/stretchr/testify/require"
@@ -68,9 +69,10 @@ func TestDriverPoolSeed(t *testing.T) {
 	p := &driverPool{}
 	d := &browser.Driver{}
 	p.seed(d)
-	got, err := p.get(context.Background())
+	got, release, err := p.get(context.Background())
 	require.NoError(t, err)
 	require.Same(t, d, got, "seeded driver must be served without launching")
+	release()
 }
 
 func TestDriverPoolSeedReplacesStaleDriver(t *testing.T) {
@@ -78,12 +80,44 @@ func TestDriverPoolSeedReplacesStaleDriver(t *testing.T) {
 	p := &driverPool{d: stale}
 	visible := &browser.Driver{}
 	p.seed(visible)
-	got, err := p.get(context.Background())
+	got, release, err := p.get(context.Background())
 	require.NoError(t, err)
 	require.Same(t, visible, got, "the user-visible driver must win over a pre-existing headless one")
+	release() // seed below drains in-flight callers, so hold nothing across it
 
 	p.seed(visible) // re-seed on proxy restart must not close the live driver
-	got, err = p.get(context.Background())
+	got, release2, err := p.get(context.Background())
 	require.NoError(t, err)
 	require.Same(t, visible, got)
+	release2()
+}
+
+// A start_proxy that reseeds the pool must not Close the driver a browser_*
+// call is still driving: MCP tool calls are not guaranteed to be serialized.
+func TestDriverPoolSeedWaitsForInFlightCaller(t *testing.T) {
+	inUse := &browser.Driver{}
+	p := &driverPool{d: inUse}
+
+	got, release, err := p.get(context.Background())
+	require.NoError(t, err)
+	require.Same(t, inUse, got)
+
+	seeded := make(chan struct{})
+	go func() {
+		p.seed(&browser.Driver{})
+		close(seeded)
+	}()
+
+	select {
+	case <-seeded:
+		t.Fatal("seed swapped (and closed) the driver while a caller still held it")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case <-seeded:
+	case <-time.After(2 * time.Second):
+		t.Fatal("seed never completed after the in-flight caller released")
+	}
 }

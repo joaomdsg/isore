@@ -37,7 +37,7 @@ func TestFixingANoteRecordsTheAgentsSummaryForTheUser(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, fixed, 1)
 	assert.Equal(t, int64(500), fixed[0].FixedAt)
-	assert.Equal(t, "swapped red for brand green", fixed[0].AgentSummary)
+	assert.Equal(t, "swapped red for brand green", notes.LatestSummary(fixed[0]))
 	assert.Equal(t, notes.StatusFixed, fixed[0].AgentStatus,
 		"the overlay reads one status field to color the badge")
 }
@@ -50,14 +50,16 @@ func TestASummarylessFixStillColorsTheBadgeFixed(t *testing.T) {
 	assert.Equal(t, notes.StatusFixed, fixed[0].AgentStatus)
 }
 
-func TestRefixingCannotRewriteHistoryTheFirstSummaryStands(t *testing.T) {
+func TestRefixingASettledNoteIsANoOpSoNoDuplicateSummaryIsAppended(t *testing.T) {
 	t.Parallel()
 	once, err := notes.MarkFixed([]notes.Note{n("a", 100, 0)}, "a", 500, "first story")
 	require.NoError(t, err)
 	twice, err := notes.MarkFixed(once, "a", 900, "revised story")
 	require.NoError(t, err)
 	require.Len(t, twice, 1)
-	assert.Equal(t, "first story", twice[0].AgentSummary)
+	assert.Len(t, twice[0].Thread, 1, "a fix with no intervening nudge must not append again")
+	assert.Equal(t, "first story", notes.LatestSummary(twice[0]))
+	assert.Equal(t, int64(500), twice[0].FixedAt, "the original fix time stands")
 }
 
 func TestWorkingOnAFixedNoteIsRejectedSoAgentsRedispatchInstead(t *testing.T) {
@@ -114,7 +116,43 @@ func TestAFixArrivingWithNoOtherChangeStillRepaints(t *testing.T) {
 	require.NoError(t, err)
 	changed := notes.Diff(before, fixed)
 	require.Len(t, changed, 1)
-	assert.Equal(t, "done", changed[0].AgentSummary)
+	assert.Equal(t, "done", notes.LatestSummary(changed[0]))
+}
+
+func TestOpenTracksTheThread(t *testing.T) {
+	t.Parallel()
+	fresh := n("a", 100, 0)
+	assert.True(t, notes.Open(fresh), "a never-fixed note is open")
+
+	fixed, err := notes.MarkFixed([]notes.Note{fresh}, "a", 500, "first pass")
+	require.NoError(t, err)
+	assert.False(t, notes.Open(fixed[0]), "a fixed note whose last entry is a summary is settled")
+
+	nudged := fixed[0]
+	nudged.Thread = append(nudged.Thread, notes.ThreadEntry{Kind: notes.EntryNudge, Base: "first pass", Text: "make it tighter", At: 600})
+	assert.True(t, notes.Open(nudged), "a nudge awaiting a new summary reopens the note")
+}
+
+func TestNudgeReopensForWorkThenFixAppendsANewSummary(t *testing.T) {
+	t.Parallel()
+	fixed, err := notes.MarkFixed([]notes.Note{n("a", 100, 0)}, "a", 500, "first pass")
+	require.NoError(t, err)
+	// The overlay appends the nudge and re-stamps DispatchedAt on dispatch.
+	nudged := fixed[0]
+	nudged.Thread = append(nudged.Thread, notes.ThreadEntry{Kind: notes.EntryNudge, Base: "first pass", Text: "make it tighter", At: 600})
+	nudged.DispatchedAt = 700
+	all := []notes.Note{nudged}
+
+	working, err := notes.MarkWorking(all, "a")
+	require.NoError(t, err, "a dispatched nudge is open again, so the agent can pick it up")
+	assert.Equal(t, notes.StatusWorking, working[0].AgentStatus)
+
+	refixed, err := notes.MarkFixed(working, "a", 900, "second pass")
+	require.NoError(t, err)
+	assert.Len(t, refixed[0].Thread, 3, "summary, nudge, summary — the whole thread is kept")
+	assert.Equal(t, "second pass", notes.LatestSummary(refixed[0]))
+	assert.Equal(t, int64(900), refixed[0].FixedAt)
+	assert.False(t, notes.Open(refixed[0]))
 }
 
 func TestDiffCatchesACommentEvenThoughNoteTextIsUnchanged(t *testing.T) {

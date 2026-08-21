@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/joaomdsg/isore/internal/fonts"
 	"github.com/joaomdsg/isore/internal/notes"
 	"github.com/joaomdsg/isore/internal/store"
 )
@@ -98,6 +100,16 @@ func NewServer(target *url.URL, st *store.Store, overlay []byte, poll time.Durat
 	s.mux.HandleFunc("GET /__isore/overlay.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		w.Write(s.overlay)
+	})
+	s.mux.HandleFunc("GET /__isore/fonts/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/__isore/fonts/")
+		data, ok := fonts.Get(name)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "font/woff2")
+		w.Write(data)
 	})
 	s.mux.HandleFunc("POST /__isore/dispatch", s.handleDispatch)
 	s.mux.HandleFunc("POST /__isore/delete", s.handleDelete)

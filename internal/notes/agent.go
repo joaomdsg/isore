@@ -20,7 +20,7 @@ func MarkWorking(all []Note, id string) ([]Note, error) {
 		if updated[i].ID != id {
 			continue
 		}
-		if updated[i].FixedAt != 0 {
+		if !Open(updated[i]) {
 			return nil, fmt.Errorf("note %q is already fixed; it reopens only when re-dispatched", id)
 		}
 		updated[i].AgentStatus = StatusWorking
